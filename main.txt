@@ -1,0 +1,296 @@
+
+// ELEVATOR ADVANCED - PRACA AUTOMATYCZNA
+
+// =========================================================
+// REGION 1: LOGIKA BEZPIECZEŃSTWA I ZALACZANIE AUTOMATYKI
+// =========================================================
+
+// Postój maszyny 
+IF #"Emergency stop" AND #"Stop" AND NOT #statRunning THEN
+    #"Yellow 1" := TRUE;
+    #"Yellow 2" := TRUE;
+    #"Yellow 3" := TRUE;
+END_IF;
+
+// Warunki zatrzymania 
+IF NOT #"Emergency stop" OR NOT #"Stop" THEN
+    
+    #statRunning := FALSE;
+    
+    // Zatrzymanie wszystkich napędów 
+    #"Conveyor 0" := FALSE;
+    #"Conveyor 1" := FALSE;
+    #"Conveyor 2" := FALSE;
+    #"Conveyor 3" := FALSE;
+    #"Up" := FALSE;
+    #"Down" := FALSE;
+    #"Load" := FALSE;
+    #"Unload" := FALSE;
+    
+    // Sygnalizacja 
+    #"Stop light" := TRUE;
+    #"Warning light" := FALSE;
+    #"Start light" := FALSE;
+    #"Green 1" := FALSE;
+    #"Green 2" := FALSE;
+    #"Green 3" := FALSE;
+    #"Yellow 1" := FALSE;
+    #"Yellow 2" := FALSE;
+    #"Yellow 3" := FALSE;
+    // Czerwone moduły na kolumnach sygnalizacyjnych 
+    #"Red 1" := TRUE;
+    #"Red 2" := TRUE;
+    #"Red 3" := TRUE;
+END_IF;
+
+// Rozpoczęcie pracy automatycznej
+IF #"Start" AND #"FACTORY I/O (Uruchomiony)" AND #"Emergency stop" AND #"Stop" THEN
+    
+    #statRunning := TRUE;
+    
+    // Sygnalizacja swietlna dla pracy automatycznej
+    #"Warning light" := TRUE;   // Lampa ostrzegawcza windy
+    #"Start light" := TRUE;     // Podświetlenie przycisku Start
+    #"Stop light" := FALSE;
+    #"Reset light" := FALSE;
+    #"Yellow 1" := FALSE;
+    #"Yellow 2" := FALSE;
+    #"Yellow 3" := FALSE;
+    
+    // Zielone moduły na kolumnach sygnalizacyjnych 
+    #"Green 1" := TRUE;
+    #"Green 2" := TRUE;
+    #"Green 3" := TRUE;
+    
+    // Czerwone moduły na kolumnach sygnalizacyjnych 
+    #"Red 1" := FALSE;
+    #"Red 2" := FALSE;
+    #"Red 3" := FALSE;
+END_IF;
+
+// =================================
+// REGION 2: GŁÓWNA LOGIKA MASZYNY
+// =================================
+
+// Cykliczne skanowanie sygnału z czujnika At entry w celu detekcji zbocza
+#trigEntry(CLK := #"At entry");
+#trigExit(CLK := #"At exit");
+#trigAtElevator(CLK := #"At exit");
+
+IF #statRunning THEN
+    CASE #statStep OF
+        0: // INIT - Zjazd bazowy po zaniku zasilania, Stopie lub E-Stopie
+            #statTargetFloor := 0; // Wymuszamy cel jazdy na parter
+            
+            // Kiedy winda dojedzie na sam dół (lub już tam jest)
+            IF #"At 0 (low)" AND #"At 0 (high)" THEN
+                #statStep := 10;
+            END_IF;
+            
+        10: // Załadunek pustego pudełka na windę
+            #"Conveyor 0" := TRUE;
+            IF NOT #"At elevator" THEN
+                #"Load" := TRUE;
+            END_IF;
+            
+            // Oczekiwanie na zbocze opadające at entry (lub narastające, zależnie od czujnika)
+            IF #trigEntry.Q THEN
+                #"Conveyor 0" := FALSE;
+                #"Load" := FALSE;
+                #statItemCount := 0;    // Wyzerowanie licznika detali w nowym pudełku
+                #statStep := 20;        // Przejście do oczekiwania na wezwania
+            END_IF;
+            
+        20: // Oczekiwanie na detale z pięter (Wybór celu)
+            IF #statReq1 THEN
+                #statTargetFloor := 1;
+                #statStep := 30;
+                
+            ELSIF #statReq2 THEN
+                #statTargetFloor := 2;
+                #statStep := 30;
+                
+            ELSIF #statReq3 THEN
+                #statTargetFloor := 3;
+                #statStep := 30;
+            END_IF;
+            
+        30: // Oczekiwanie na dojazd windy na zadane piętro
+            // Moduł pozycjonowania (Region 3) realizuje jazdę. My tylko czekamy na zgodność.
+            IF #statCurrentFloor = #statTargetFloor THEN
+                #statStep := 40;
+            END_IF;
+
+        40: // Wrzucanie detalu do pudełka z taśmy
+            
+            // Odliczanie czasu na wpadnięcie detalu (np. 1200 milisekund)
+            #timerLoad(IN := TRUE,
+                       PT := T#1700ms);
+            
+            IF #timerLoad.Q THEN
+                #timerLoad(IN := FALSE,
+                           PT := T#1700ms); // Reset timera
+                
+                // Kasowanie flagi wezwania z obsłużonego piętra
+                IF #statCurrentFloor = 1 THEN
+                    #statReq1 := FALSE;
+                END_IF;
+                IF #statCurrentFloor = 2 THEN
+                    #statReq2 := FALSE;
+                END_IF;
+                IF #statCurrentFloor = 3 THEN
+                    #statReq3 := FALSE;
+                END_IF;
+                
+                #statItemCount := #statItemCount + 1; // Aktualizacja ilości w pudełku
+                #statStep := 50;
+            END_IF;
+            
+        50: // Kalkulacja: czy pudełko jest pełne?
+            IF #statItemCount >= 5 THEN
+                #statTargetFloor := 0; // Pudełko pełne, zjazd na parter
+                #statStep := 60;
+            ELSE
+                #statStep := 20; // Pudełko ma jeszcze miejsce, nasłuchujemy kolejnych wezwań
+            END_IF;
+            
+        60: // Oczekiwanie na zjazd na parter (z pełnym pudełkiem)
+            IF #statCurrentFloor = 0 THEN
+                #statStep := 70;
+            END_IF;
+            
+        70: // Wypuszczenie pełnego pudełka z windy
+            #"Load" := TRUE;
+            #"Exit conveyor" := TRUE;
+            #timerUnload(IN := TRUE,
+                  PT := T#4000ms);
+            IF #timerUnload.Q THEN
+                #timerUnload(IN := FALSE,
+                    PT := T#4000ms); // Reset timera
+                #"Load" := FALSE;
+                #"Exit conveyor" := FALSE;
+                #statStep := 10; // Powrót do kroku wciągania nowego, pustego pudełka
+            END_IF;
+    END_CASE;
+    
+    // Wystawienie aktualnej wartości licznika na wyświetlacz
+    #"Display" := #statItemCount;
+    
+ELSE
+    // Bezpieczny reset maszyny stanów w przypadku zatrzymania układu
+    #statStep := 0;
+    #"Conveyor 0" := FALSE;
+    #"Load" := FALSE;
+    #"Unload" := FALSE;
+    #"Exit conveyor" := FALSE;
+    #timerLoad(IN := FALSE,
+               PT := T#2s); // Wyzerowanie timera, aby nie "wisiał"
+END_IF;
+
+// ==========================================
+// REGION 3: MODUŁ POZYCJONOWANIA WINDY
+// ==========================================
+
+// Aktualizacja obecnego położenia windy
+IF #"At 0 (low)" AND #"At 0 (high)" THEN
+    #statCurrentFloor := 0;
+END_IF;
+IF #"At 1 (low)" AND #"At 1 (high)" THEN
+    #statCurrentFloor := 1;
+END_IF;
+IF #"At 2 (low)" AND #"At 2 (high)" THEN
+    #statCurrentFloor := 2;
+END_IF;
+IF #"At 3 (low)" AND #"At 3 (high)" THEN
+    #statCurrentFloor := 3;
+END_IF;
+
+// Sterowanie silnikiem windy
+IF #statRunning THEN
+
+    // JAZDA W GÓRĘ
+    IF #statTargetFloor > #statCurrentFloor THEN
+        #"Up" := TRUE;
+        #"Down" := FALSE;
+        
+        // Włączenie biegu wolnego (Slow) po najechaniu na czujnik Low docelowego piętra
+        IF (#statTargetFloor = 1 AND #"At 1 (low)") OR
+            (#statTargetFloor = 2 AND #"At 2 (low)") OR
+            (#statTargetFloor = 3 AND #"At 3 (low)") THEN
+            #"Slow" := TRUE;
+        ELSE
+            #"Slow" := FALSE;
+        END_IF;
+        
+        // JAZDA W DÓŁ
+    ELSIF #statTargetFloor < #statCurrentFloor THEN
+        #"Up" := FALSE;
+        #"Down" := TRUE;
+        
+        // Włączenie biegu wolnego (Slow) po najechaniu na czujnik High docelowego piętra
+        IF (#statTargetFloor = 0 AND #"At 0 (high)") OR
+            (#statTargetFloor = 1 AND #"At 1 (high)") OR
+            (#statTargetFloor = 2 AND #"At 2 (high)") THEN
+            #"Slow" := TRUE;
+        ELSE
+            #"Slow" := FALSE;
+        END_IF;
+        
+        // Lokalizacja na docelowym piętrze
+    ELSE
+        #"Up" := FALSE;
+        #"Down" := FALSE;
+        #"Slow" := FALSE;
+    END_IF;
+    
+END_IF;
+
+// ==========================================
+// REGION 4: MENEDŻER ZGŁOSZEŃ I TAŚMOCIĄGI
+// ==========================================
+
+IF #statRunning THEN
+    
+    // Sterowanie przenośnikiem 1
+    IF #statStep = 40 AND #statCurrentFloor = 1 THEN
+        #"Conveyor 1" := TRUE; // Wymuszone zrzucanie do windy
+    ELSE
+        #"Conveyor 1" := #"At 1"; // Normalne dowożenie detali do krawędzi
+    END_IF;
+    
+    // Sterowanie przenośnikiem 2
+    IF #statStep = 40 AND #statCurrentFloor = 2 THEN
+        #"Conveyor 2" := TRUE;
+    ELSE
+        #"Conveyor 2" := #"At 2";
+    END_IF;
+    
+    // Sterowanie przenośnikiem 3
+    IF #statStep = 40 AND #statCurrentFloor = 3 THEN
+        #"Conveyor 3" := TRUE;
+    ELSE
+        #"Conveyor 3" := #"At 3";
+    END_IF;
+    
+    // Zapisywanie zgłoszeń w pamięci
+    // Jeśli pojawi się detal, winda dostaje request z danego piętra
+    IF NOT #"At 1" THEN
+        #statReq1 := TRUE;
+    END_IF;
+    
+    IF NOT #"At 2" THEN
+        #statReq2 := TRUE;
+    END_IF;
+    
+    IF NOT #"At 3" THEN
+        #statReq3 := TRUE;
+    END_IF;
+    
+ELSE
+    // W przypadku zatrzymania awaryjnego - stop conveyorów
+    #"Conveyor 1" := FALSE;
+    #"Conveyor 2" := FALSE;
+    #"Conveyor 3" := FALSE;
+END_IF;
+
+
